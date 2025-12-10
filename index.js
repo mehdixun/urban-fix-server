@@ -98,7 +98,25 @@ async function run() {
       res.send(result);
     });
 
-    
+    // ---------------- UPDATE ISSUE ----------------
+    app.put("/issues/:id", async (req, res) => {  // <-- /issues/:id
+      const id = req.params.id;
+      const { title, description, category, location } = req.body;
+      const updateDoc = { $set: { title, description, category, location } };
+
+      const result = await issuesCollection.updateOne({ _id: new ObjectId(id) }, updateDoc);
+      if (result.matchedCount === 0) return res.status(404).send({ message: "Issue not found" });
+
+      res.send({ message: "Issue updated successfully" });
+    });
+
+    // ---------------- DELETE ISSUE ----------------
+    app.delete("/issues/:id", async (req, res) => {
+      const id = req.params.id;
+      const result = await issuesCollection.deleteOne({ _id: new ObjectId(id) });
+      if (result.deletedCount === 0) return res.status(404).send({ message: "Issue not found" });
+      res.send({ message: "Issue deleted successfully" });
+    });
 
     // ---------------- HOME ----------------
     app.get("/", (req, res) => {
