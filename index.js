@@ -51,6 +51,39 @@ async function run() {
       res.send({ token, user });
     });
 
+    // ---------------- GET ISSUES ----------------
+    app.get("/issues", optionalJWT, async (req, res) => {
+      const { page = 1, limit = 20, search, category, status, postedBy } = req.query;
+      const query = {};
+
+      if (search) {
+        const regex = new RegExp(search, "i");
+        query.$or = [
+          { title: { $regex: regex } },
+          { description: { $regex: regex } },
+          { location: { $regex: regex } }
+        ];
+      }
+
+      if (category) query.category = category;
+      if (status) query.status = status;
+      if (postedBy) query.postedBy = postedBy;
+
+      const skip = (page - 1) * parseInt(limit);
+      const total = await issuesCollection.countDocuments(query);
+      const issues = await issuesCollection.find(query).skip(skip).limit(parseInt(limit)).toArray();
+
+      res.send({ total, page: parseInt(page), limit: parseInt(limit), issues });
+    });
+
+    // ---------------- GET SINGLE ISSUE ----------------
+    app.get("/issues/:id", async (req, res) => {
+      const id = req.params.id;
+      const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+      if (!issue) return res.status(404).send({ message: "Issue not found" });
+      res.send(issue);
+    });
+
     
 
     // ---------------- HOME ----------------
