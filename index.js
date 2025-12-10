@@ -84,6 +84,20 @@ async function run() {
       res.send(issue);
     });
 
+    // ---------------- CREATE ISSUE ----------------
+    app.post("/issues", optionalJWT, async (req, res) => {
+      const issue = req.body;
+      issue.status = "Pending";
+      issue.upvotes = 0;
+      issue.upvotedUsers = [];
+      issue.createdAt = new Date();
+      issue.timeline = [
+        { status: "Pending", message: "Issue reported", updatedBy: issue.postedBy, date: new Date() }
+      ];
+      const result = await issuesCollection.insertOne(issue);
+      res.send(result);
+    });
+
     
 
     // ---------------- HOME ----------------
