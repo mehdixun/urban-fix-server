@@ -1,8 +1,8 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const jwt = require("jsonwebtoken");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const stripe = require("stripe")(process.env.STRIPE_SECRET);
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -10,35 +10,11 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// MongoDB setup
+// ---------- MongoDB ----------
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.dy2dskh.mongodb.net/?retryWrites=true&w=majority`;
 const client = new MongoClient(uri, { serverApi: { version: ServerApiVersion.v1 } });
 
-// JWT helper
-const signToken = (payload) =>
-  jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "7d" });
-
-// Optional JWT middleware
-const optionalJWT = (req, res, next) => {
-  const header = req.headers.authorization;
-  if (!header) {
-    req.user = undefined;
-    return next();
-  }
-  const token = header.split(" ")[1];
-  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-    if (err) req.user = undefined;
-    else req.user = decoded;
-    next();
-  });
-};
-
-// Middleware to protect admin routes
-const verifyAdmin = (req, res, next) => {
-  if (!req.user || req.user.role !== "admin")
-    return res.status(403).send({ message: "Admin access required" });
-  next();
-};
+let usersCollection, issuesCollection, paymentsCollection;
 
 async function run() {
   try {
@@ -46,170 +22,223 @@ async function run() {
     console.log("✅ MongoDB Connected");
 
     const db = client.db("urbanFixDB");
-    const usersCollection = db.collection("users");
-    const issuesCollection = db.collection("issues");
+    usersCollection = db.collection("users");
+    issuesCollection = db.collection("issues");
+    paymentsCollection = db.collection("payments");
 
-    // ---------------- JWT ----------------
-    app.post("/jwt", async (req, res) => {
-      const { email } = req.body;
-      const user = await usersCollection.findOne({ email: email.toLowerCase() });
-      const role = user?.role || "citizen";
-      const token = signToken({ email, role });
-      res.send({ token });
+    await usersCollection.createIndex({ email: 1 }, { unique: true });
+    await paymentsCollection.createIndex({ sessionId: 1 }, { unique: true });
+
+    // ================= USERS =================
+    app.post("/users", async (req, res) => {
+      const { email, name, photoURL, role } = req.body;
+      const userDoc = {
+        email: email.toLowerCase(),
+        name: name || "",
+        photoURL: photoURL || "",
+        role: role || "citizen",
+        updatedAt: new Date(),
+      };
+      await usersCollection.updateOne(
+        { email: userDoc.email },
+        { $set: userDoc, $setOnInsert: { createdAt: new Date() } },
+        { upsert: true }
+      );
+      const user = await usersCollection.findOne({ email: userDoc.email });
+      res.send(user);
     });
 
-    // ---------------- REGISTER / CREATE USER ----------------
-    app.post("/users", async (req, res) => {
+    app.get("/users/:email", async (req, res) => {
+      const email = req.params.email.toLowerCase();
+      const user = await usersCollection.findOne({ email });
+      if (!user) return res.status(404).send({ message: "User not found" });
+      res.send(user);
+    });
+
+    app.put("/users/:email", async (req, res) => {
+      const email = req.params.email.toLowerCase();
+      const { name, photoURL } = req.body;
+      const result = await usersCollection.findOneAndUpdate(
+        { email },
+        { $set: { name, photoURL, updatedAt: new Date() } },
+        { returnDocument: "after" }
+      );
+      res.send({ user: result.value });
+    });
+
+    // ================= PAYMENTS =================
+    app.post("/create-checkout-session", async (req, res) => {
+      const { cost, userEmail } = req.body;
       try {
-        const { name, email, phone, password, role, isBlocked, isPremium } = req.body;
-        if (!name || !email || !password)
-          return res.status(400).send({ message: "Name, email & password are required" });
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          mode: "payment",
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: { name: "UrbanFix Premium Service" },
+                unit_amount: cost * 100,
+              },
+              quantity: 1,
+            },
+          ],
+          success_url: `http://localhost:5173/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `http://localhost:5173/dashboard/payment-cancel`,
+        });
+        res.send({ url: session.url, sessionId: session.id });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ message: "Failed to create session" });
+      }
+    });
 
-        const exists = await usersCollection.findOne({ email: email.toLowerCase() });
-        if (exists) return res.status(400).send({ message: "User already exists" });
+    // Verify payment and store in DB
+    app.post("/payments/verify", async (req, res) => {
+      const { sessionId, email } = req.body;
+      try {
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        if (session.payment_status !== "paid") return res.status(400).send({ message: "Payment not completed" });
 
-        const user = {
-          name,
-          email: email.toLowerCase(),
-          phone: phone || "",
-          password,
-          role: role || "citizen",
-          isBlocked: isBlocked || false,
-          isPremium: isPremium || false,
-          createdAt: new Date()
+        const exists = await paymentsCollection.findOne({ sessionId });
+        if (exists) return res.send({ message: "Already verified" });
+
+        const paymentDoc = {
+          userEmail: email.toLowerCase(),
+          amount: session.amount_total / 100,
+          transactionId: session.payment_intent,
+          sessionId,
+          status: "Paid",
+          method: "Card",
+          createdAt: new Date(),
         };
 
-        await usersCollection.insertOne(user);
-        const { password: _, ...cleanUser } = user;
-        res.send({ message: "User created successfully", user: cleanUser });
+        await paymentsCollection.insertOne(paymentDoc);
+        res.send(paymentDoc);
       } catch (err) {
-        res.status(500).send({ message: err.message });
+        console.error(err);
+        res.status(500).send({ message: "Verification failed" });
       }
     });
 
-    // ---------------- GET ALL USERS ----------------
-    app.get("/users", async (req, res) => {
-      try {
-        const users = await usersCollection.find().toArray();
-        const cleanUsers = users.map(u => {
-          const { password, ...rest } = u;
-          return rest;
-        });
-        res.send(cleanUsers);
-      } catch (err) {
-        res.status(500).send({ message: err.message });
-      }
+    // Fetch user payments
+    app.get("/payments/:email", async (req, res) => {
+      const email = req.params.email.toLowerCase();
+      const payments = await paymentsCollection
+        .find({ userEmail: email })
+        .sort({ createdAt: -1 })
+        .toArray();
+      res.send(payments);
     });
 
-    // ---------------- GET SINGLE USER ----------------
-    app.get("/users/:email", optionalJWT, async (req, res) => {
-      try {
-        const email = req.params.email.toLowerCase();
-        const user = await usersCollection.findOne({ email });
-        if (!user) return res.status(404).send({ message: "User not found" });
-        const { password, ...clean } = user;
-        res.send(clean);
-      } catch (err) {
-        res.status(500).send({ message: err.message });
-      }
+    // ================= ISSUES =================
+    app.get("/issues", async (req, res) => {
+      const issues = await issuesCollection.find().sort({ createdAt: -1 }).toArray();
+      res.send(issues);
     });
 
-    // ---------------- UPDATE USER ----------------
-    app.put("/users/:email", optionalJWT, async (req, res) => {
-      try {
-        const email = req.params.email.toLowerCase();
-        const { name, phone, photoURL, role, isBlocked, isPremium } = req.body;
-        const result = await usersCollection.findOneAndUpdate(
-          { email },
-          { $set: { name, phone, photoURL, role, isBlocked, isPremium } },
-          { returnDocument: "after" }
-        );
-        if (!result.value) return res.status(404).send({ message: "User not found" });
-        const { password, ...updatedUser } = result.value;
-        res.send({ message: "User updated successfully", user: updatedUser });
-      } catch (err) {
-        res.status(500).send({ message: err.message });
-      }
-    });
-
-    // ---------------- ADMIN ROUTES ----------------
-    app.patch("/admin/users/block/:email", optionalJWT, verifyAdmin, async (req, res) => {
-      try {
-        const email = req.params.email.toLowerCase();
-        const user = await usersCollection.findOne({ email });
-        if (!user) return res.status(404).send({ message: "User not found" });
-        const newStatus = !user.isBlocked;
-        await usersCollection.updateOne({ email }, { $set: { isBlocked: newStatus } });
-        res.send({ message: `User ${newStatus ? "blocked" : "unblocked"} successfully` });
-      } catch (err) {
-        res.status(500).send({ message: err.message });
-      }
-    });
-
-    // ---------------- ISSUES ROUTES (UNCHANGED) ----------------
-    app.get("/issues", optionalJWT, async (req, res) => {
-      const { page = 1, limit = 20, search, category, status, postedBy } = req.query;
-      const query = {};
-      if (search) {
-        const regex = new RegExp(search, "i");
-        query.$or = [
-          { title: { $regex: regex } },
-          { description: { $regex: regex } },
-          { location: { $regex: regex } },
-        ];
-      }
-      if (category) query.category = category;
-      if (status) query.status = status;
-      if (postedBy) query.postedBy = postedBy;
-
-      const skip = (page - 1) * parseInt(limit);
-      const total = await issuesCollection.countDocuments(query);
-      const issues = await issuesCollection.find(query).skip(skip).limit(parseInt(limit)).toArray();
-
-      res.send({ total, page: parseInt(page), limit: parseInt(limit), issues });
+    app.get("/issues/my/:email", async (req, res) => {
+      const email = req.params.email.toLowerCase();
+      const issues = await issuesCollection.find({ "postedBy.email": email }).sort({ createdAt: -1 }).toArray();
+      res.send(issues);
     });
 
     app.get("/issues/:id", async (req, res) => {
-      const id = req.params.id;
+      const { id } = req.params;
+      if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid ID" });
       const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
       if (!issue) return res.status(404).send({ message: "Issue not found" });
       res.send(issue);
     });
 
-    app.post("/issues", optionalJWT, async (req, res) => {
-      const issue = req.body;
-      issue.status = "Pending";
-      issue.upvotes = 0;
-      issue.upvotedUsers = [];
-      issue.createdAt = new Date();
-      issue.timeline = [{ status: "Pending", message: "Issue reported", updatedBy: issue.postedBy, date: new Date() }];
-      const result = await issuesCollection.insertOne(issue);
-      res.send(result);
+    app.post("/issues", async (req, res) => {
+      const p = req.body;
+      const issueDoc = {
+        title: p.title,
+        description: p.description || "",
+        location: p.location || "",
+        category: p.category || "General",
+        status: "Pending",
+        priority: p.priority || "Normal",
+        postedBy: {
+          email: p.postedBy?.email || "",
+          name: p.postedBy?.name || "",
+          photoURL: p.postedBy?.photoURL || "",
+        },
+        image: p.image || "",
+        upvotes: 0,
+        upvotedUsers: [],
+        timeline: p.timeline || [
+          {
+            status: "Pending",
+            message: "Issue reported by citizen",
+            updatedBy: p.postedBy?.email || "Unknown",
+            date: new Date(),
+          },
+        ],
+        createdAt: new Date(),
+      };
+      await issuesCollection.insertOne(issueDoc);
+      res.send(issueDoc);
     });
 
     app.put("/issues/:id", async (req, res) => {
-      const id = req.params.id;
-      const { title, description, category, location } = req.body;
-      const result = await issuesCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { title, description, category, location } }
-      );
-      if (result.matchedCount === 0) return res.status(404).send({ message: "Issue not found" });
-      res.send({ message: "Issue updated successfully" });
+      const { id } = req.params;
+      if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid ID" });
+
+      const { title, description, category, location, image, userEmail } = req.body;
+      const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+      if (!issue) return res.status(404).send({ message: "Issue not found" });
+
+      if (userEmail && issue.postedBy.email !== userEmail) return res.status(403).send({ message: "Unauthorized" });
+
+      const updateDoc = { title, description, category, location, ...(image && { image }), updatedAt: new Date() };
+      await issuesCollection.updateOne({ _id: new ObjectId(id) }, { $set: updateDoc });
+      const updatedIssue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+      res.send(updatedIssue);
     });
 
     app.delete("/issues/:id", async (req, res) => {
-      const id = req.params.id;
-      const result = await issuesCollection.deleteOne({ _id: new ObjectId(id) });
-      if (result.deletedCount === 0) return res.status(404).send({ message: "Issue not found" });
+      const { id } = req.params;
+      const { userEmail } = req.body;
+      if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid ID" });
+
+      const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+      if (!issue) return res.status(404).send({ message: "Issue not found" });
+
+      if (userEmail && issue.postedBy.email !== userEmail) return res.status(403).send({ message: "Unauthorized" });
+
+      await issuesCollection.deleteOne({ _id: new ObjectId(id) });
       res.send({ message: "Issue deleted successfully" });
     });
 
-    app.get("/", (req, res) => res.send("UrbanFix backend is running..."));
+    app.patch("/issues/toggle-upvote/:id", async (req, res) => {
+      const { id } = req.params;
+      const { email } = req.body;
+      if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid ID" });
+
+      const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+      if (!issue) return res.status(404).send({ message: "Issue not found" });
+
+      if (issue.postedBy?.email === email) return res.status(400).send({ message: "Cannot upvote own issue" });
+
+      const alreadyUpvoted = issue.upvotedUsers?.includes(email);
+      const updatedUpvotedUsers = alreadyUpvoted
+        ? issue.upvotedUsers.filter((e) => e !== email)
+        : [...(issue.upvotedUsers || []), email];
+      const updatedUpvotes = alreadyUpvoted ? (issue.upvotes || 1) - 1 : (issue.upvotes || 0) + 1;
+
+      await issuesCollection.updateOne({ _id: new ObjectId(id) }, { $set: { upvotes: updatedUpvotes, upvotedUsers: updatedUpvotedUsers } });
+      const updatedIssue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+      res.send({ issue: updatedIssue });
+    });
+
+    // ================= SERVER START =================
+    app.listen(port, () => console.log(`🚀 Server running on http://localhost:${port}`));
+    app.get("/", (_, res) => res.send("🔥 UrbanFix Backend Running"));
   } catch (err) {
-    console.error(err);
+    console.error("❌ Backend Error:", err);
   }
 }
 
-run().catch(console.dir);
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+run();
