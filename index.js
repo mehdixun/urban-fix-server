@@ -19,7 +19,7 @@ let usersCollection, issuesCollection, paymentsCollection;
 async function run() {
   try {
     await client.connect();
-    console.log("✅ MongoDB Connected");
+    console.log("MongoDB Connected");
 
     const db = client.db("urbanFixDB");
     usersCollection = db.collection("users");
@@ -29,7 +29,7 @@ async function run() {
     await usersCollection.createIndex({ email: 1 }, { unique: true });
     await paymentsCollection.createIndex({ sessionId: 1 }, { unique: true });
 
-    // ================= USERS =================
+    //USERS
     app.post("/users", async (req, res) => {
       const { email, name, photoURL, role } = req.body;
       const userDoc = {
@@ -66,7 +66,7 @@ async function run() {
       res.send({ user: result.value });
     });
 
-    // ================= PAYMENTS =================
+    // PAYMENTS 
     app.post("/create-checkout-session", async (req, res) => {
       const { cost, userEmail } = req.body;
       try {
@@ -93,7 +93,6 @@ async function run() {
       }
     });
 
-    // Verify payment and store in DB
     app.post("/payments/verify", async (req, res) => {
       const { sessionId, email } = req.body;
       try {
@@ -121,7 +120,6 @@ async function run() {
       }
     });
 
-    // Fetch user payments
     app.get("/payments/:email", async (req, res) => {
       const email = req.params.email.toLowerCase();
       const payments = await paymentsCollection
@@ -131,7 +129,7 @@ async function run() {
       res.send(payments);
     });
 
-    // ================= ISSUES =================
+    // ISSUES 
     app.get("/issues", async (req, res) => {
       const issues = await issuesCollection.find().sort({ createdAt: -1 }).toArray();
       res.send(issues);
@@ -212,32 +210,37 @@ async function run() {
       res.send({ message: "Issue deleted successfully" });
     });
 
-    app.patch("/issues/toggle-upvote/:id", async (req, res) => {
+    // UPVOTE
+    app.put("/issues/:id/upvote", async (req, res) => {
       const { id } = req.params;
-      const { email } = req.body;
+      const { userEmail } = req.body;
+
       if (!ObjectId.isValid(id)) return res.status(400).send({ message: "Invalid ID" });
 
       const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
       if (!issue) return res.status(404).send({ message: "Issue not found" });
 
-      if (issue.postedBy?.email === email) return res.status(400).send({ message: "Cannot upvote own issue" });
+      if (issue.postedBy?.email === userEmail) return res.status(400).send({ message: "Cannot upvote own issue" });
 
-      const alreadyUpvoted = issue.upvotedUsers?.includes(email);
-      const updatedUpvotedUsers = alreadyUpvoted
-        ? issue.upvotedUsers.filter((e) => e !== email)
-        : [...(issue.upvotedUsers || []), email];
-      const updatedUpvotes = alreadyUpvoted ? (issue.upvotes || 1) - 1 : (issue.upvotes || 0) + 1;
+      const alreadyUpvoted = issue.upvotedUsers?.includes(userEmail);
+      if (alreadyUpvoted) return res.status(400).send({ message: "Already upvoted" });
 
-      await issuesCollection.updateOne({ _id: new ObjectId(id) }, { $set: { upvotes: updatedUpvotes, upvotedUsers: updatedUpvotedUsers } });
+      const updatedUpvotedUsers = [...(issue.upvotedUsers || []), userEmail];
+      const updatedUpvotes = (issue.upvotes || 0) + 1;
+
+      await issuesCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { upvotes: updatedUpvotes, upvotedUsers: updatedUpvotedUsers } }
+      );
+
       const updatedIssue = await issuesCollection.findOne({ _id: new ObjectId(id) });
-      res.send({ issue: updatedIssue });
+      res.send(updatedIssue);
     });
 
-    // ================= SERVER START =================
-    app.listen(port, () => console.log(`🚀 Server running on http://localhost:${port}`));
-    app.get("/", (_, res) => res.send("🔥 UrbanFix Backend Running"));
+    app.listen(port, () => console.log(`Server running on http://localhost:${port}`));
+    app.get("/", (_, res) => res.send(" UrbanFix Backend Running"));
   } catch (err) {
-    console.error("❌ Backend Error:", err);
+    console.error(" Backend Error:", err);
   }
 }
 
