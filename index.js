@@ -18,7 +18,7 @@ let usersCollection, issuesCollection, paymentsCollection;
 
 async function run() {
   try {
-    await client.connect();
+    // await client.connect();
     console.log("MongoDB Connected");
 
     const db = client.db("urbanFixDB");
@@ -83,8 +83,8 @@ async function run() {
               quantity: 1,
             },
           ],
-          success_url: `http://localhost:5173/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `http://localhost:5173/dashboard/payment-cancel`,
+          success_url: `https://urban-fix.netlify.app/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `https://urban-fix.netlify.app/dashboard/payment-cancel`,
         });
         res.send({ url: session.url, sessionId: session.id });
       } catch (err) {
