@@ -66,7 +66,7 @@ async function run() {
       res.send({ user: result.value });
     });
 
-    // PAYMENTS 
+    // PAYMENTS SECTION 
     app.post("/create-checkout-session", async (req, res) => {
       const { cost, userEmail } = req.body;
       try {
